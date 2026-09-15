@@ -56,6 +56,36 @@ java -cp out sim.app.SimulateMain \
 - Al final imprime cantidad de eventos procesados, tiempo de sistema alcanzado y partículas
   usadas.
 
+## 3) Animar (Python)
+
+Todo vive en `analysis/`. Requiere `numpy` y `matplotlib` (`pip install --user numpy matplotlib`).
+Lee el `.txt` que ya escribió el motor Java — no reimplementa nada de `sim/`.
+
+```bash
+python3 analysis/animate.py --traj output/particles.txt \
+    [--obstacles output/obstaculos.txt] \
+    [--L 1.20] [--W 0.68] [--d 0.20] [--r 0.0175] \
+    --out output/animacion.gif [--stride 1] [--speed 1.0] [--min-duration 20] [--fps 15]
+```
+
+- `--traj` y `--out` son obligatorios; el resto tiene como default los valores fijos del
+  enunciado.
+- `--L`/`--W`/`--d`/`--r` deben coincidir con los usados al generar/simular.
+- `--obstacles` es opcional — si la corrida tuvo obstáculos, dibuja cada uno como un círculo gris
+  fijo.
+- `--stride N` anima 1 de cada N bloques guardados (útil si se corrió con `--saveEvery 1` y el
+  archivo tiene muchos bloques) — sigue usando solo bloques reales del txt, nunca posiciones
+  intermedias calculadas por MRU.
+- Cada frame es exactamente un bloque del archivo; como el Δt entre bloques es irregular
+  (motor event-driven), cada uno se mantiene en pantalla un tiempo proporcional a su Δt real en
+  vez de una duración fija — `--speed` escala tiempo real de simulación a tiempo de video (1.0 =
+  tiempo real), `--min-duration` pone un piso en ms para que un Δt casi nulo no genere un frame
+  ilegible, y `--fps` solo define cuánto dura en pantalla el último frame (no tiene un Δt real
+  siguiente del cual derivar su duración).
+- Dibuja las paredes, el arco (segmento dorado) en cada pared corta, los obstáculos (si los hay)
+  y una partícula por círculo — azul mientras está fresca, rojo desde que toca el arco por
+  primera vez. El título de cada frame muestra `t` y la fracción de partículas ya usadas.
+
 ## Formato de archivos
 
 **Trayectoria** (`particles.txt`): crece en bloques, uno por cada guardado.
