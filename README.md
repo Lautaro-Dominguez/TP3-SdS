@@ -86,6 +86,31 @@ python3 analysis/animate.py --traj output/particles.txt \
   y una partícula por círculo — azul mientras está fresca, rojo desde que toca el arco por
   primera vez. El título de cada frame muestra `t` y la fracción de partículas ya usadas.
 
+## 4) Punto 1.1 — tiempo de ejecución vs N
+
+Requiere `numpy` y `matplotlib` (igual que el punto anterior). Corre `GenerateMain`/
+`SimulateMain` como subproceso vía `analysis/run_java.py` y cronometra cada corrida con
+`time.perf_counter()`.
+
+```bash
+python3 analysis/exec_time_vs_n.py \
+    [--n-min 10] [--n-max 300] [--n-step 10] [--reps 10] [--tmax 30] \
+    [--L 1.20] [--W 0.68] --out output/exec_time_vs_n.png
+```
+
+- Sin obstáculos, mesa y radio reales de la consigna. `N` va de `--n-min` a `--n-max` en pasos de
+  `--n-step` — el rango por default (10 a 300) es el máximo razonable para esta mesa: con
+  `r=0.0175` fijo, `N=2000` (como pide literalmente la letra del punto 1.1) necesitaría más del
+  200% de densidad de empaquetamiento en los 0.816 m² de la mesa, imposible incluso con
+  empaquetamiento hexagonal perfecto (máximo teórico ~90.7%, `N≈769`).
+- Por cada `N`, corre `--reps` realizaciones independientes (posición inicial nueva y sin semilla
+  fija en cada una) hasta el tiempo de sistema fijo `--tmax` (`tf`), midiendo solo el tiempo de
+  `SimulateMain` (la generación previa no se cronometra). Cada corrida graba con `--saveEvery 1`,
+  como el resto del TP, así que el tiempo medido incluye ese I/O.
+- Grafica el tiempo de ejecución promedio por `N` con barras de error (desvío estándar muestral
+  entre las `--reps` realizaciones).
+- Las corridas son secuenciales para no distorsionar la medición de tiempo de pared.
+
 ## Formato de archivos
 
 **Trayectoria** (`particles.txt`): crece en bloques, uno por cada guardado.
