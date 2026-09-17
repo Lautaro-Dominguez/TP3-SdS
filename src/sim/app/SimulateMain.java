@@ -6,6 +6,7 @@ import sim.event.CollisionResolver;
 import sim.event.CollisionTime;
 import sim.event.Event;
 import sim.event.EventQueue;
+import sim.io.GoalFileIO;
 import sim.io.ObstacleFileIO;
 import sim.io.PropertiesFileIO;
 import sim.io.StateFileIO;
@@ -14,6 +15,7 @@ import java.nio.file.Path;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 
 /**
@@ -23,10 +25,14 @@ import java.util.Map;
  * every {@code saveEvery} accepted events - until every particle has become "usada" or the
  * simulation clock reaches {@code tmax}.
  *
+ * Every goal is logged (time + accumulated goal count), and t90 - the time at which
+ * Fu = N_g/N reaches 0.9 - is reported on stdout, so a sweep driver can read it without ever
+ * touching the trajectory file.
+ *
  * Usage:
  *   java -cp out sim.app.SimulateMain [--L 1.20] [--W 0.68] [--d 0.20]
  *       [--in output/particles.txt] [--props output/properties.txt] [--obstacles obstacles.txt]
- *       [--tmax 100] [--saveEvery 1] [--out output/particles.txt]
+ *       [--tmax 100] [--saveEvery 1] [--out output/particles.txt] [--goals output/goals.txt]
  */
 public final class SimulateMain {
 
@@ -41,6 +47,12 @@ public final class SimulateMain {
         Path in = Path.of(flags.getOrDefault("in", "output/particles.txt"));
         Path props = Path.of(flags.getOrDefault("props", "output/properties.txt"));
         Path out = Path.of(flags.getOrDefault("out", flags.getOrDefault("in", "output/particles.txt")));
+        String goalsFlag = flags.get("goals");
+
+        // saveEvery 0 disables trajectory output entirely: the configuration sweeps of point 1.2
+        // only need the goal log, and writing one N-particle block per event would dominate both
+        // the runtime and the disk usage of a few hundred runs.
+        boolean writeTrajectory = saveEvery > 0;
 
         List<Obstacle> obstacles = Collections.emptyList();
         String obstaclesFlag = flags.get("obstacles");
@@ -53,7 +65,7 @@ public final class SimulateMain {
         Particle[] particles = particleList.toArray(new Particle[0]);
         int n = particles.length;
 
-        if (!out.equals(in)) {
+        if (writeTrajectory && !out.equals(in)) {
             StateFileIO.writeInitial(out, particleList);
         }
 
@@ -73,6 +85,14 @@ public final class SimulateMain {
         for (Particle p : particles) {
             if (p.getState() == Particle.State.USED) usedCount++;
         }
+
+        // At most one goal per particle (a used particle never scores again), so N entries is an
+        // exact bound on the goal log.
+        double[] goalTimes = new double[n];
+        int[] goalCounts = new int[n];
+        int goalsLogged = 0;
+        int goalsForT90 = goalsForT90(n);
+        double t90 = usedCount >= goalsForT90 ? 0.0 : Double.NaN;
 
         while (true) {
             Event e = queue.pollNextValid(particles);
@@ -97,6 +117,12 @@ public final class SimulateMain {
                     if (CollisionResolver.isGoal(p, w, d)) {
                         p.markUsed();
                         usedCount++;
+                        goalTimes[goalsLogged] = tGlobal;
+                        goalCounts[goalsLogged] = usedCount;
+                        goalsLogged++;
+                        if (Double.isNaN(t90) && usedCount >= goalsForT90) {
+                            t90 = tGlobal;
+                        }
                     }
                     CollisionResolver.resolveWallX(p);
                     enqueueWallAndObstacleEvents(queue, particles, obstacles, l, w, tGlobal, e.i);
@@ -130,11 +156,13 @@ public final class SimulateMain {
                 }
             }
 
-            eventsSinceSave++;
-            if (eventsSinceSave >= saveEvery) {
-                StateFileIO.appendBlock(out, tGlobal, particleList);
-                lastSavedTime = tGlobal;
-                eventsSinceSave = 0;
+            if (writeTrajectory) {
+                eventsSinceSave++;
+                if (eventsSinceSave >= saveEvery) {
+                    StateFileIO.appendBlock(out, tGlobal, particleList);
+                    lastSavedTime = tGlobal;
+                    eventsSinceSave = 0;
+                }
             }
 
             if (usedCount >= n) {
@@ -142,13 +170,30 @@ public final class SimulateMain {
             }
         }
 
-        if (tGlobal > lastSavedTime) {
+        if (writeTrajectory && tGlobal > lastSavedTime) {
             StateFileIO.appendBlock(out, tGlobal, particleList);
+        }
+        if (goalsFlag != null) {
+            GoalFileIO.write(Path.of(goalsFlag), goalTimes, goalCounts, goalsLogged);
         }
 
         System.out.printf(
             "Simulated %d events (N=%d, t=%.6f, used=%d/%d, obstacles=%d) -> %s%n",
-            eventsProcessed, n, tGlobal, usedCount, n, obstacles.size(), out);
+            eventsProcessed, n, tGlobal, usedCount, n,
+            obstacles.size(), writeTrajectory ? out.toString() : "(no trajectory)");
+        // Machine-readable summary line for the sweep drivers: t90 is NaN when Fu never reached
+        // 0.9 within tmax (the "censored" case the competition ranks by goals instead).
+        System.out.printf(Locale.US, "t90 %.6f ng %d%n", t90, usedCount);
+    }
+
+    /**
+     * Smallest goal count k with k/N >= 0.9, i.e. k = ceil(9N/10), in exact integer arithmetic.
+     * Math.ceil(0.9 * n) happens to agree for every n we care about, but it relies on 0.9 * n
+     * rounding favourably (0.9 is not representable in binary); this form is exact by
+     * construction. For N=100 both give 90.
+     */
+    private static int goalsForT90(int n) {
+        return (9 * n + 9) / 10;
     }
 
     private static void advanceAll(Particle[] particles, double dt) {
