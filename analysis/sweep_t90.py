@@ -9,10 +9,11 @@ N=100 partículas y mide t90 - el tiempo en que Fu(t) = N_g(t)/N alcanza 0.9 - r
 contra la variable estudiada, y comparando contra la mesa vacía. El enunciado pide al menos 5
 realizaciones por configuración.
 
-t90 lo devuelve el propio motor en stdout ("t90 <valor> ng <goles>"), así que no hace falta
-escribir ni parsear trayectorias: las corridas usan --saveEvery 0. Si Fu no llega a 0.9 antes de
-tmax el motor reporta t90 = NaN (caso "censurado"), que es el que el enunciado manda rankear por
-número promedio de goles a tmax.
+El motor solo simula y graba la trayectoria; t90 se calcula acá, en Python, leyendo ese txt
+(ver t90_io.py). Con --save-every 1 el motor graba un bloque por evento, así que el bloque en el
+que Fu cruza 0.9 es exactamente el del gol numero 90 y t90 sale sin error de discretizacion. Si
+Fu no llega a 0.9 antes de tmax, t90 es NaN (caso "censurado"), que es el que el enunciado manda
+rankear por numero promedio de goles a tmax.
 
 Los barridos disponibles (ver obstacle_configs.py):
     b       radio de un obstáculo centrado
@@ -43,42 +44,31 @@ import matplotlib.pyplot as plt
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import obstacle_configs as oc
-from run_java import generate, _run
+from run_java import generate, simulate
+from t90_io import t90_de_trayectoria
 
 N_PARTICLES = 100
 
 
-def _simulate_t90(in_path, props_path, obstacles, tmax, l, w, d):
-    """Corre SimulateMain sin trayectoria y devuelve (t90, N_g(tmax)) leídos de stdout."""
-    flags = {
-        "L": l, "W": w, "d": d,
-        "in": in_path, "props": props_path,
-        "tmax": tmax, "saveEvery": 0,
-    }
-    if obstacles is not None:
-        flags["obstacles"] = obstacles
-    stdout = _run("sim.app.SimulateMain", flags)
-    for line in reversed(stdout.strip().splitlines()):
-        tokens = line.split()
-        if len(tokens) == 4 and tokens[0] == "t90" and tokens[2] == "ng":
-            return float(tokens[1]), int(tokens[3])
-    raise RuntimeError(f"SimulateMain no reporto t90:\n{stdout}")
+def one_realization(config_path, rep, seed, workdir, tmax, l, w, d, save_every, n=N_PARTICLES):
+    """Una realizacion: estado inicial nuevo, simulacion, y t90 leido del txt de trayectoria.
 
-
-def one_realization(config_path, rep, seed, workdir, tmax, l, w, d, n=N_PARTICLES):
-    """Una realización: estado inicial nuevo + simulación. Devuelve (t90, N_g(tmax))."""
+    La trayectoria se borra apenas se extrajo t90: con --saveEvery 1 cada corrida pesa ~135 MB y
+    el barrido son cientos de corridas.
+    """
     tag = f"{Path(config_path).stem if config_path else 'vacia'}_rep{rep}"
     particles = workdir / f"{tag}_p.txt"
     props = workdir / f"{tag}_props.txt"
     generate(n, l, w, particles, props, obstacles=config_path, seed=seed)
     try:
-        return _simulate_t90(particles, props, config_path, tmax, l, w, d)
+        simulate(l, w, particles, props, particles, tmax, save_every, d=d, obstacles=config_path)
+        return t90_de_trayectoria(particles, n)
     finally:
         particles.unlink(missing_ok=True)
         props.unlink(missing_ok=True)
 
 
-def measure(config, label, workdir, reps, tmax, seed0, jobs, l=oc.L, w=oc.W, d=oc.D,
+def measure(config, label, workdir, reps, tmax, seed0, jobs, save_every, l=oc.L, w=oc.W, d=oc.D,
             allow_empty=False):
     """M realizaciones de una configuración -> (<t90>, sigma, t90s, n_censuradas, <N_g(tmax)>).
 
@@ -96,7 +86,7 @@ def measure(config, label, workdir, reps, tmax, seed0, jobs, l=oc.L, w=oc.W, d=o
         oc.write(config_path, config)
 
     def run(rep):
-        return one_realization(config_path, rep, seed0 + rep, workdir, tmax, l, w, d)
+        return one_realization(config_path, rep, seed0 + rep, workdir, tmax, l, w, d, save_every)
 
     try:
         with ThreadPoolExecutor(max_workers=jobs) as pool:
@@ -171,13 +161,15 @@ def main():
                                       formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--barrido", required=True,
                         choices=["b", "a", "c", "d-xf", "d-delta", "vacia"])
-    parser.add_argument("--reps", type=int, default=10,
+    parser.add_argument("--reps", type=int, default=5,
                         help="realizaciones por configuracion (el enunciado pide >= 5)")
+    parser.add_argument("--save-every", type=int, default=1,
+                        help="cada cuantos eventos graba el motor; 1 da t90 exacto")
     parser.add_argument("--tmax", type=float, default=100.0, help="t_max, igual al de la competencia")
     parser.add_argument("--seed0", type=int, default=1000, help="semilla base (seed = seed0 + rep)")
     parser.add_argument("--jobs", type=int, default=4,
                         help="corridas en paralelo; seguro porque se mide tiempo de simulacion, "
-                             "no de ejecucion")
+                             "no de ejecucion (cada corrida escribe ~135 MB con --save-every 1)")
     parser.add_argument("--no-baseline", action="store_true", help="no correr la mesa vacia")
     # barrido b
     parser.add_argument("--r-min", type=float, default=0.02)
@@ -217,7 +209,7 @@ def main():
     try:
         for value, label, config in sweep:
             res = measure(config, label, workdir, args.reps, args.tmax, args.seed0, args.jobs,
-                           allow_empty=(args.barrido == "vacia"))
+                           args.save_every, allow_empty=(args.barrido == "vacia"))
             if res is not None:
                 res["value"] = value
                 res["config"] = config
@@ -229,7 +221,7 @@ def main():
         if not args.no_baseline and args.barrido != "vacia":
             print("Referencia:")
             baseline = measure([], "vacia", workdir, args.reps, args.tmax, args.seed0,
-                                args.jobs, allow_empty=True)
+                                args.jobs, args.save_every, allow_empty=True)
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
 
