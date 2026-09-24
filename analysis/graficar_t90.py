@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import csv
 import math
+import sys
 from collections import defaultdict
 from pathlib import Path
 
@@ -25,6 +26,9 @@ import numpy as np
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from simulacion import leyenda_arriba
 
 REFERENCIA = "00_mesa_vacia"
 
@@ -115,11 +119,14 @@ def main():
     ax.set_xticks(xs)
     ax.set_xticklabels([etiqueta(n, dict(ordenadas)[n]) for n in nombres], fontsize=9)
     ax.set_ylabel(r"$\langle t_{90} \rangle$ [s]")
-    ax.set_title(f"$t_{{90}}$ por configuracion  (N = 100, {reps} realizaciones, "
-                 r"barra de error: $\sigma$)")
     ax.grid(True, axis="y", alpha=0.3, zorder=0)
-    ax.legend(loc="upper left", fontsize=9)
-    fig.tight_layout()
+    # Sin titulo y con la leyenda arriba, fuera del area de datos: con las barras ordenadas de
+    # menor a mayor, cualquier leyenda interna terminaba tapando la barra mas alta.
+    leyenda_arriba(ax, ncol=2)
+    fig.text(0.5, 0.005, f"N = 100   |   {reps} realizaciones   |   "
+                          r"barra de error: $\sigma$ (desvio estandar)",
+             ha="center", fontsize=9, color="dimgray")
+    fig.tight_layout(rect=(0, 0.03, 1, 1))
     destino.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(destino, dpi=150)
     print(f"Grafico guardado en {destino}")
