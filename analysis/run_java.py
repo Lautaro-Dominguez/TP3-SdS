@@ -14,7 +14,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 CLASSES = REPO_ROOT / "out"
 
 
-def _run(main_class, flags):
+def _run(main_class, flags, timeout=None):
     if not CLASSES.exists():
         raise SystemExit(
             f'No existe {CLASSES} - corre `javac -d out $(find src -name "*.java")` en '
@@ -22,14 +22,15 @@ def _run(main_class, flags):
     cmd = ["java", "-cp", str(CLASSES), main_class]
     for key, value in flags.items():
         cmd += [f"--{key}", str(value)]
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
     if result.returncode != 0:
         raise RuntimeError(
             f"{main_class} fallo (args={flags}):\n{result.stdout}\n{result.stderr}")
     return result.stdout
 
 
-def generate(n, l, w, out_state, out_props, r=None, m=None, v0=None, obstacles=None, seed=None):
+def generate(n, l, w, out_state, out_props, r=None, m=None, v0=None, obstacles=None, seed=None,
+             timeout=None):
     flags = {"N": n, "L": l, "W": w, "outState": out_state, "outProps": out_props}
     if r is not None:
         flags["r"] = r
@@ -41,10 +42,11 @@ def generate(n, l, w, out_state, out_props, r=None, m=None, v0=None, obstacles=N
         flags["obstacles"] = obstacles
     if seed is not None:
         flags["seed"] = seed
-    return _run("sim.app.GenerateMain", flags)
+    return _run("sim.app.GenerateMain", flags, timeout=timeout)
 
 
-def simulate(l, w, in_path, props_path, out_path, tmax, save_every, d=None, obstacles=None):
+def simulate(l, w, in_path, props_path, out_path, tmax, save_every, d=None, obstacles=None,
+             timeout=None):
     flags = {
         "L": l,
         "W": w,
@@ -58,4 +60,4 @@ def simulate(l, w, in_path, props_path, out_path, tmax, save_every, d=None, obst
         flags["d"] = d
     if obstacles is not None:
         flags["obstacles"] = obstacles
-    return _run("sim.app.SimulateMain", flags)
+    return _run("sim.app.SimulateMain", flags, timeout=timeout)

@@ -94,21 +94,28 @@ Requiere `numpy` y `matplotlib` (igual que el punto anterior). Corre `GenerateMa
 
 ```bash
 python3 analysis/exec_time_vs_n.py \
-    [--n-min 10] [--n-max 300] [--n-step 10] [--reps 10] [--tmax 30] \
+    [--step 10] [--reps 10] [--tmax 30] [--timeout-min 10] \
     [--L 1.20] [--W 0.68] --out output/exec_time_vs_n.png
 ```
 
-- Sin obstáculos, mesa y radio reales de la consigna. `N` va de `--n-min` a `--n-max` en pasos de
-  `--n-step` — el rango por default (10 a 300) es el máximo razonable para esta mesa: con
-  `r=0.0175` fijo, `N=2000` (como pide literalmente la letra del punto 1.1) necesitaría más del
-  200% de densidad de empaquetamiento en los 0.816 m² de la mesa, imposible incluso con
-  empaquetamiento hexagonal perfecto (máximo teórico ~90.7%, `N≈769`).
+- Sin obstáculos, mesa y radio reales de la consigna. `N` arranca en `--step` y va sumando
+  `--step` (`N = step, 2·step, 3·step, ...`) — el máximo **no se fija a mano**: con `r=0.0175`
+  fijo, `N=2000` (como pide literalmente la letra del punto 1.1) necesitaría más del 200% de
+  densidad de empaquetamiento en los 0.816 m² de la mesa, imposible incluso con empaquetamiento
+  hexagonal perfecto (máximo teórico ~90.7%, `N≈769`), así que en vez de eso el script **descubre
+  el N máximo alcanzable por timeout**: cada realización individual (una corrida de `generate` +
+  `simulate`) tiene `--timeout-min` minutos (default 10) para terminar. En cuanto una sola
+  repetición de un `N` se pasa de ese tiempo, ese `N` entero se descarta (no se grafica, aunque
+  otras repeticiones suyas ya hayan terminado) y la barrida corta ahí — el `N` anterior, que sí
+  completó todas sus `--reps` realizaciones, queda como el máximo.
 - Por cada `N`, corre `--reps` realizaciones independientes (posición inicial nueva y sin semilla
   fija en cada una) hasta el tiempo de sistema fijo `--tmax` (`tf`), midiendo solo el tiempo de
-  `SimulateMain` (la generación previa no se cronometra). Cada corrida graba con `--saveEvery 1`,
-  como el resto del TP, así que el tiempo medido incluye ese I/O.
-- Grafica el tiempo de ejecución promedio por `N` con barras de error (desvío estándar muestral
-  entre las `--reps` realizaciones).
+  `SimulateMain` (la generación previa no se cronometra, pero sí cuenta para el timeout de esa
+  repetición). Cada corrida graba con `--saveEvery 1`, como el resto del TP, así que el tiempo
+  medido incluye ese I/O.
+- Genera **dos** gráficos a partir de `--out`: el path tal cual en escala lineal, y
+  `{nombre}_log.png` en escala log-log (útil para leer la complejidad algorítmica de la curva).
+  Ambos con barras de error (desvío estándar muestral entre las `--reps` realizaciones).
 - Las corridas son secuenciales para no distorsionar la medición de tiempo de pared.
 
 ## 5) Punto 1.3 — DCM y coeficiente de difusión
@@ -146,6 +153,21 @@ python3 analysis/d_vs_t90.py --fit-tmax 3.0 [--reps 5] [--tmax 100] --out output
   Y (desvío estándar muestral de `t90` entre las `--reps` realizaciones - no baja al agregar
   realizaciones, ver comentario en `sweep_t90.py`), un color/marcador por familia y la mesa vacía
   destacada.
+
+## 6) Punto 1.4 — resumen de una corrida y estadística de la competencia
+
+```bash
+python3 analysis/resumen_t90.py --traj output/particles.txt --n 100
+```
+Analiza una trayectoria ya simulada (no corre nada nuevo): imprime una línea por cada conversión
+fresca→usada (`t=<...>s -> <usadas>/N rojas (Fu=<...>)`) y al final el `t90` (o "no alcanzado" si
+`Fu` nunca llegó a 0.9 en lo grabado).
+
+```bash
+python3 analysis/promedio_desvio.py 12.34 15.67 13.21 14.05 12.98
+```
+Promedio y desvío estándar muestral de los números pasados por parámetro — pensado para agregar
+los `<t90>` de las 5 realizaciones que pide el punto 1.4, aunque acepta cualquier cantidad.
 
 ## Formato de archivos
 
