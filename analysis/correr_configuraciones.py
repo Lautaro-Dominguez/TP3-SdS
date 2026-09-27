@@ -1,20 +1,19 @@
-"""Punto 1.2: corrida final de las configuraciones representativas de cada barrido.
+"""Punto 1.2: corrida final comparando el MEJOR caso de cada familia de obstaculos.
 
-Para cada configuracion (y para la mesa vacia, que es la referencia del enunciado):
+Las configuraciones no estan escritas a mano: se leen de los CSV que deja barrido_familia.py y,
+para cada familia, se toma el valor del parametro que minimizo <t90>. Asi el grafico comparativo
+siempre refleja el ultimo barrido y no puede quedar desfasado de el.
 
-  1. escribe el archivo de obstaculos "x y R" - uno por configuracion, y QUEDA en disco, porque
-     es el formato que pide el enunciado para la competencia y el que consume animate.py;
-  2. corre 5 realizaciones independientes (estado inicial nuevo y semilla distinta en cada una);
-  3. calcula t90 de cada realizacion leyendo el txt de trayectoria (t90_io.py) y reporta
-     <t90> y su desvio estandar muestral;
-  4. arma la animacion invocando analysis/animate.py sobre el txt de trayectoria de la primera
-     realizacion mas el txt de obstaculos.
+Para cada una (y para la mesa vacia, que es la referencia del enunciado):
+  1. escribe su archivo de obstaculos "x y R";
+  2. corre 5 realizaciones independientes;
+  3. calcula t90 de cada una leyendo el txt de trayectoria (t90_io.py) y reporta <t90> y sigma.
 
-El reparto de tareas es el del TP: el motor Java solo simula y graba la trayectoria; todo el
-post-procesamiento (t90, estadistica) y toda la visualizacion se hacen en Python a partir de esos
-txt. La simulacion graba con --saveEvery 1, asi que el bloque donde Fu cruza 0.9 es exactamente
-el del gol numero 90 y t90 no tiene error de discretizacion; la animacion submuestrea ese mismo
-txt con el --stride de animate.py.
+Estas corridas usan --saveEvery 1 (un bloque por evento), asi que t90 es exacto: son pocas
+configuraciones y el costo se paga. Los barridos, que son cientos de corridas, usan 10.
+
+Las animaciones no se rehacen aca: cada familia ya deja las de su mejor y su peor caso en
+output/familias/<familia>/animaciones/.
 
 Uso:
     python3 analysis/correr_configuraciones.py --outdir output/final
@@ -24,7 +23,6 @@ from __future__ import annotations
 import argparse
 import csv
 import math
-import subprocess
 import sys
 import tempfile
 from concurrent.futures import ThreadPoolExecutor
@@ -37,22 +35,41 @@ import obstacle_configs as oc
 from run_java import generate, simulate
 from t90_io import curva_usadas, goles_para_t90
 
-AQUI = Path(__file__).resolve().parent
 N = 100
 
 
-def configuraciones():
-    """Una configuracion representativa por barrido, mas la mesa vacia como referencia."""
-    a_tot = math.pi * 0.20 ** 2
-    return [
-        ("00_mesa_vacia", "Mesa vacia (referencia, K=0)", []),
-        ("01_ganador", "Ganador: K=1, R=0.335 centrado", oc.single_centered(0.335)),
-        ("02_descentrado", "K=1, R=0.335 descentrado (x=0.335)",
-         oc.single_longitudinal(0.335, 0.335)),
-        ("03_area_repartida", "K=16 en grilla, misma area total que R=0.20",
-         oc.grid_fixed_area(16, a_tot)),
-        ("04_embudo", "K=4, embudo hacia los arcos (R=0.08)", oc.funnel(0.10, 0.08, 0.02)),
-    ]
+def mejor_de_cada_familia(dir_familias):
+    """Lee los CSV de los barridos y devuelve la mejor configuracion de cada familia."""
+    registro = oc.familias()
+    elegidas = [("00_mesa_vacia", "Mesa vacia (referencia, K=0)", [])]
+
+    for nombre, familia in registro.items():
+        csv_path = Path(dir_familias) / nombre / f"t90_vs_{nombre}.csv"
+        if not csv_path.exists():
+            print(f"AVISO: falta {csv_path}; se omite la familia '{nombre}'. "
+                  f"Corre antes: python3 analysis/barrido_familia.py --familia {nombre}")
+            continue
+        mejor = None
+        with open(csv_path) as f:
+            for fila in csv.DictReader(f):
+                if fila["etiqueta"] == "mesa_vacia":
+                    continue
+                try:
+                    valor, media = float(fila[familia.etiqueta_parametro]), float(fila["t90_medio"])
+                except ValueError:
+                    continue
+                if math.isfinite(media) and (mejor is None or media < mejor[1]):
+                    mejor = (valor, media)
+        if mejor is None:
+            print(f"AVISO: la familia '{nombre}' no tiene ningun t90 finito; se omite.")
+            continue
+        valor, media = mejor
+        etiqueta_valor = familia.formato.format(valor)
+        elegidas.append((
+            f"{len(elegidas):02d}_{nombre}",
+            f"{familia.descripcion} | {familia.etiqueta_parametro} = {etiqueta_valor}",
+            familia.construir(valor)))
+    return elegidas
 
 
 def una_realizacion(nombre, cfg_path, rep, seed, workdir, tmax, save_every, conservar):
@@ -74,55 +91,41 @@ def una_realizacion(nombre, cfg_path, rep, seed, workdir, tmax, save_every, cons
     return t90, usadas[-1], len(ts), None
 
 
-def animar(traj, cfg_path, destino, bloques, frames_objetivo, speed):
-    """Invoca analysis/animate.py tal cual, sobre la trayectoria y los obstaculos."""
-    stride = max(1, math.ceil(bloques / frames_objetivo))
-    cmd = [sys.executable, str(AQUI / "animate.py"),
-           "--traj", str(traj), "--out", str(destino),
-           "--L", str(oc.L), "--W", str(oc.W), "--d", str(oc.D), "--r", str(oc.R_PARTICLE),
-           "--stride", str(stride), "--speed", str(speed)]
-    if cfg_path is not None:
-        cmd += ["--obstacles", str(cfg_path)]
-    salida = subprocess.run(cmd, capture_output=True, text=True)
-    if salida.returncode != 0:
-        raise RuntimeError(f"animate.py fallo:\n{salida.stdout}\n{salida.stderr}")
-    return stride, salida.stdout.strip()
-
-
 def main():
     parser = argparse.ArgumentParser(description=__doc__,
                                       formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--outdir", default="output/final")
+    parser.add_argument("--dir-familias", default="output/familias",
+                        help="de donde leer los CSV de los barridos por familia")
     parser.add_argument("--reps", type=int, default=5,
                         help="realizaciones por configuracion (el enunciado pide >= 5)")
     parser.add_argument("--tmax", type=float, default=100.0, help="igual al de la competencia")
     parser.add_argument("--save-every", type=int, default=1,
                         help="1 = un bloque por evento; da t90 exacto")
-    parser.add_argument("--seed0", type=int, default=3000)
+    parser.add_argument("--seed0", type=int, default=None,
+                        help="sin valor (lo normal) cada realizacion sortea su condicion inicial;\n"
+                             "con un entero se vuelve reproducible (semilla = seed0 + rep)")
     parser.add_argument("--jobs", type=int, default=3,
                         help="realizaciones en paralelo (cada una escribe cientos de MB)")
-    parser.add_argument("--frames", type=int, default=260, help="frames objetivo por animacion")
-    parser.add_argument("--speed", type=float, default=8.0)
-    parser.add_argument("--sin-animaciones", action="store_true")
     args = parser.parse_args()
 
     outdir = Path(args.outdir)
     dir_cfg = outdir / "obstaculos"
-    dir_gif = outdir / "animaciones"
-    for d in (dir_cfg, dir_gif):
-        d.mkdir(parents=True, exist_ok=True)
+    dir_cfg.mkdir(parents=True, exist_ok=True)
     workdir = Path(tempfile.mkdtemp(prefix="config_final_"))
 
     if args.reps < 5:
         print(f"AVISO: --reps {args.reps} esta por debajo del minimo de 5 del enunciado.\n")
 
     filas, por_realizacion = [], []
-    for nombre, descripcion, config in configuraciones():
+    for nombre, descripcion, config in mejor_de_cada_familia(args.dir_familias):
         problemas = oc.violations(config, allow_empty=(not config))
         if problemas:
             print(f"{nombre}: CONFIGURACION INVALIDA -> {problemas[0]}")
             continue
 
+        # Solo las configuraciones con obstaculos llevan archivo: la mesa vacia es la referencia
+        # del enunciado, no una configuracion de obstaculos, y se simula y anima sin --obstacles.
         cfg_path = None
         if config:
             cfg_path = dir_cfg / f"{nombre}.txt"
@@ -130,11 +133,12 @@ def main():
 
         print(f"{nombre}  |  {descripcion}")
         print(f"  K = {len(config)}"
-              + (f"  ->  {cfg_path}" if cfg_path else "   (sin archivo de obstaculos)"))
+              + (f"  ->  {cfg_path}" if cfg_path else "   (mesa vacia: sin archivo de obstaculos)"))
 
         def corrida(rep):
-            return una_realizacion(nombre, cfg_path, rep, args.seed0 + rep, workdir,
-                                    args.tmax, args.save_every, conservar=(rep == 0))
+            semilla = None if args.seed0 is None else args.seed0 + rep
+            return una_realizacion(nombre, cfg_path, rep, semilla, workdir,
+                                    args.tmax, args.save_every, conservar=False)
 
         with ThreadPoolExecutor(max_workers=args.jobs) as pool:
             resultados = list(pool.map(corrida, range(args.reps)))
@@ -163,14 +167,6 @@ def main():
         for rep, (t, ng, _b, _p) in enumerate(resultados):
             por_realizacion.append((nombre, rep + 1, t, ng))
 
-        traj = resultados[0][3]
-        if not args.sin_animaciones and traj is not None:
-            stride, log = animar(traj, cfg_path, dir_gif / f"{nombre}.gif",
-                                  resultados[0][2], args.frames, args.speed)
-            print(f"    animacion (stride {stride} sobre {resultados[0][2]} bloques): {log}")
-        if traj is not None:
-            traj.unlink(missing_ok=True)
-            (workdir / f"{nombre}_rep0_properties.txt").unlink(missing_ok=True)
         print()
 
     # Un archivo con el resumen y otro con el detalle por realizacion: el segundo es el que
@@ -196,8 +192,10 @@ def main():
             print(f"  {nombre:20s} K={k:2d}   <t90> = {media:6.2f} +- {sigma:5.2f} s{extra}")
         else:
             print(f"  {nombre:20s} K={k:2d}   sin t90 (todas censuradas), <N_g> = {ng:.1f}")
-    print(f"\nObstaculos -> {dir_cfg}/\nAnimaciones -> {dir_gif}/"
+    print(f"\nObstaculos -> {dir_cfg}/"
           f"\nDatos -> {csv_resumen}\n        {csv_detalle}")
+    print("Animaciones del mejor y peor caso de cada familia: "
+          "output/familias/<familia>/animaciones/")
 
 
 if __name__ == "__main__":
