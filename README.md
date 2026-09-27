@@ -15,7 +15,7 @@ Esto compila todo a `out/`. No hace falta recompilar entre corridas mientras no 
 ## 1) Generar el estado inicial
 
 ```bash
-java -cp out sim.app.GenerateMain --N 100 \
+01_centr \
     [--L 1.20] [--W 0.68] [--r 0.0175] [--m 0.025] [--v0 1.0] \
     [--obstacles obstaculos.txt] [--seed 42] \
     [--outState output/particles.txt] [--outProps output/properties.txt]
