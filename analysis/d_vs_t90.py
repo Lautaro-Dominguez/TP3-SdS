@@ -1,27 +1,32 @@
-"""Punto 1.3: D vs <t90> para la mesa vacía y todas las configuraciones del punto 1.2.
+"""Punto 1.3: D vs <t90> para la MEJOR configuracion de cada familia (+ mesa vacia).
 
-Reusa los mismos barridos de `sweep_t90.py` (misma `build_sweep`, mismos defaults) para que cada
-punto D vs t90 corresponda exactamente a una configuración ya explorada en 1.2, y así el
-scatter final sea comparable punto a punto.
-
-Para cada configuración:
-  - <t90> y su desvío: `sweep_t90.measure` con --reps realizaciones completas (igual que 1.2).
-  - D: UNA realización nueva (el enunciado pide "para una realización"), simulada solo hasta
-    --fit-tmax + margen (no hace falta correrla hasta el final: el DCM ya satura mucho antes de
-    t90, ver `msd.py`), y ajustada con `msd.fit_D` en la ventana [0, --fit-tmax].
+Pasos:
+  1. Seleccion. Para cada familia se toman los --candidatos mejores valores del barrido de 1.2
+     (leidos de output/familias/<familia>/t90_vs_<familia>.csv, hecho con pocas realizaciones) y se
+     los vuelve a medir con --reps-seleccion realizaciones. El mejor es el de menor <t90> de esta
+     segunda medicion: con 5 realizaciones el ruido (~2-3 s) es del orden de la diferencia entre
+     vecinos, asi que la primera medicion solo sirve para preseleccionar.
+  2. Medicion final. La configuracion elegida (y la mesa vacia) se corre --reps veces: <t90> y su
+     desvio salen de las --reps realizaciones y D sale SOLO de la primera (el enunciado pide el DCM
+     "para una realizacion"). Esa primera se graba con --saveEvery 1 para tener el DCM sin perder
+     resolucion temporal.
+  3. D = pendiente / 4 del ajuste lineal (ordenada libre) de DCM(t) en [0, --t-fit], ver msd.py. El
+     mismo --t-fit vale para todas las familias.
 
 Uso:
-    python3 analysis/d_vs_t90.py --fit-tmax 3.0 --reps 5 --out output/d_vs_t90.png
+    python3 analysis/d_vs_t90.py --t-fit 2.0 --outdir output/d_vs_t90
 """
 from __future__ import annotations
 
 import argparse
+import csv
+import math
 import shutil
 import sys
 import tempfile
-from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
+import numpy as np
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -29,120 +34,107 @@ import matplotlib.pyplot as plt
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import obstacle_configs as oc
 from msd import compute_msd, fit_D
-from run_java import generate, simulate
-from sweep_t90 import build_sweep, measure
+from simulacion import medir
 
-BARRIDOS = ["b", "a", "c", "d-xf", "d-delta"]
-MARKERS = {"b": "o", "a": "s", "c": "^", "d-xf": "D", "d-delta": "v", "vacia": "*"}
-COLORS = {"b": "tab:blue", "a": "tab:orange", "c": "tab:green", "d-xf": "tab:purple",
-          "d-delta": "tab:brown", "vacia": "tab:red"}
-
-
-def default_sweep_args():
-    """Namespace con los mismos defaults que el parser de sweep_t90.py, para las 5 familias."""
-    return argparse.Namespace(
-        r_min=0.02, r_max=0.30, r_step=0.02,
-        R=0.10, a_points=11,
-        R1=0.10, c_ns=[1, 2, 4, 6, 8, 12, 16, 24, 32],
-        delta=0.02, xf_max=0.30, xf=0.15, delta_max=0.10, d_points=6,
-    )
+FAMILIAS = ["centro", "desplazado", "multiples", "embudo"]
+COLORES = {"vacia": "tab:red", "centro": "tab:blue", "desplazado": "tab:orange",
+           "multiples": "tab:green", "embudo": "tab:purple"}
+MARCADORES = {"vacia": "*", "centro": "o", "desplazado": "s", "multiples": "^", "embudo": "D"}
 
 
-def measure_D(config, label, workdir, fit_tmax, seed, l, w, d, n=100, margin=1.0):
-    """UNA realización, simulada solo hasta fit_tmax+margin. Devuelve D o None si es invalida."""
-    if oc.violations(config, l, w, allow_empty=True):
-        return None
-    config_path = None
-    if config:
-        config_path = workdir / f"{label}_D.txt"
-        oc.write(config_path, config)
-    particles = workdir / f"{label}_D_p.txt"
-    props = workdir / f"{label}_D_props.txt"
-    try:
-        generate(n, l, w, particles, props, obstacles=config_path, seed=seed)
-        simulate(l, w, particles, props, particles, tmax=fit_tmax + margin, save_every=1,
-                 d=d, obstacles=config_path)
-        ts, msd = compute_msd(particles)
-        D, _c0, _c1 = fit_D(ts, msd, fit_tmax)
-        return D
-    finally:
-        particles.unlink(missing_ok=True)
-        props.unlink(missing_ok=True)
-        if config_path:
-            config_path.unlink(missing_ok=True)
+def candidatos(familia, k, indir):
+    """Los k valores del parametro con menor <t90> segun el barrido de 1.2 (ignora censuradas)."""
+    with open(Path(indir) / familia.nombre / f"t90_vs_{familia.nombre}.csv") as f:
+        filas = [r for r in csv.reader(f)][1:]
+    validas = [(float(r[2]), float(r[0])) for r in filas
+               if r[1] != "mesa_vacia" and r[2] not in ("", "nan")]
+    return [valor for _t90, valor in sorted(validas)[:k]]
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__,
                                       formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--fit-tmax", type=float, required=True,
-                         help="ventana [0, fit-tmax] para el ajuste de D (elegida a mano, ver msd.py)")
-    parser.add_argument("--reps", type=int, default=5, help="realizaciones para <t90> (igual que 1.2)")
-    parser.add_argument("--tmax", type=float, default=100.0, help="tmax para <t90>, igual al de competencia")
-    parser.add_argument("--seed0", type=int, default=1000)
+    parser.add_argument("--t-fit", type=float, required=True,
+                        help="ventana [0, t-fit] del ajuste de D, la misma para todas las familias")
+    parser.add_argument("--indir", default="output/familias", help="salida de barrido_familia.py")
+    parser.add_argument("--outdir", default="output/d_vs_t90")
+    parser.add_argument("--candidatos", type=int, default=4)
+    parser.add_argument("--reps-seleccion", type=int, default=20)
+    parser.add_argument("--reps", type=int, default=5, help="realizaciones de la medicion final")
+    parser.add_argument("--tmax", type=float, default=100.0)
     parser.add_argument("--jobs", type=int, default=4)
-    parser.add_argument("--out", required=True, help="PNG de salida (scatter D vs t90)")
-    parser.add_argument("--csv", default=None, help="default: junto al PNG")
     args = parser.parse_args()
 
-    sweep_args = default_sweep_args()
-    l, w, d = oc.L, oc.W, oc.D
+    outdir = Path(args.outdir)
+    outdir.mkdir(parents=True, exist_ok=True)
     workdir = Path(tempfile.mkdtemp(prefix="d_vs_t90_"))
+    fams = oc.familias()
 
-    points = [("vacia", "vacia", [])]
-    for barrido in BARRIDOS:
-        sweep_args.barrido = barrido
-        _xlabel, sweep = build_sweep(sweep_args)
-        for _value, label, config in sweep:
-            points.append((barrido, label, config))
-
-    results = []
+    elegidas = [("vacia", "mesa vacia", [])]
     try:
-        for barrido, label, config in points:
-            allow_empty = barrido == "vacia"
-            t90_res = measure(config, label, workdir, args.reps, args.tmax, args.seed0, args.jobs,
-                               l=l, w=w, d=d, allow_empty=allow_empty)
-            if t90_res is None:
-                continue
-            # semilla de D independiente de --reps: si dependiera de reps, cambiar reps por otro
-            # motivo (ej. mas precision en t90) cambiaria la unica realizacion que define D.
-            D = measure_D(config, label, workdir, args.fit_tmax, args.seed0 + 10_000, l, w, d)
-            if D is None:
-                continue
-            results.append(dict(barrido=barrido, label=label, t90=t90_res["mean"],
-                                 t90_std=t90_res["std"], D=D))
-            print(f"  {label}: D={D:.5f}  <t90>={t90_res['mean']:.2f}+-{t90_res['std']:.2f}s")
+        for nombre in FAMILIAS:
+            fam = fams[nombre]
+            mejor = None
+            print(f"{nombre}: seleccion entre {args.candidatos} candidatos, "
+                  f"{args.reps_seleccion} realizaciones c/u")
+            for valor in candidatos(fam, args.candidatos, args.indir):
+                cfg = fam.construir(valor)
+                res = medir(cfg, f"sel_{nombre}_{fam.formato.format(valor)}", workdir,
+                            args.reps_seleccion, args.tmax, None, 10, args.jobs)
+                if res.get("invalida") or math.isnan(res["media"]):
+                    continue
+                print(f"  {fam.etiqueta_parametro} = {valor}: <t90> = {res['media']:.2f} "
+                      f"+- {res['sigma']:.2f} s")
+                if mejor is None or res["media"] < mejor[0]:
+                    mejor = (res["media"], valor, cfg)
+            print(f"  -> mejor: {mejor[1]}\n")
+            elegidas.append((nombre, f"{nombre} ({fam.formato.format(mejor[1])})", mejor[2]))
+
+        filas, curvas = [], []
+        for nombre, rotulo, cfg in elegidas:
+            res = medir(cfg, f"final_{nombre}", workdir, args.reps, args.tmax, None, 1,
+                        args.jobs, dir_config=outdir / "obstaculos", conservar_primera=True,
+                        permitir_vacia=(nombre == "vacia"))
+            ts, dcm = compute_msd(res["traj"])
+            D, c0, c1 = fit_D(ts, dcm, args.t_fit)
+            res["traj"].unlink(missing_ok=True)
+            print(f"{rotulo}: <t90> = {res['media']:.2f} +- {res['sigma']:.2f} s   D = {D:.5f}")
+            filas.append((nombre, rotulo, res["media"], res["sigma"], D))
+            curvas.append((nombre, rotulo, ts, dcm, c0, c1))
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
 
-    if not results:
-        raise SystemExit("ningun punto valido")
+    with open(outdir / "d_vs_t90.csv", "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["familia", "configuracion", "t90_medio", "t90_desvio", "D", "t_fit"])
+        for nombre, rotulo, media, sigma, D in filas:
+            w.writerow([nombre, rotulo, media, sigma, D, args.t_fit])
 
-    csv_path = Path(args.csv) if args.csv else Path(args.out).with_suffix(".csv")
-    csv_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(csv_path, "w") as f:
-        f.write("barrido,etiqueta,D,t90_medio,t90_desvio\n")
-        for r in results:
-            f.write(f"{r['barrido']},{r['label']},{r['D']},{r['t90']},{r['t90_std']}\n")
-
-    fig, ax = plt.subplots(figsize=(8, 6))
-    for barrido in ["vacia"] + BARRIDOS:
-        pts = [r for r in results if r["barrido"] == barrido and r["t90"] == r["t90"]]  # descarta NaN
-        if not pts:
-            continue
-        ax.errorbar([r["D"] for r in pts], [r["t90"] for r in pts],
-                     yerr=[r["t90_std"] for r in pts],
-                     fmt=MARKERS[barrido], color=COLORS[barrido], label=barrido, alpha=0.8,
-                     markersize=9 if barrido == "vacia" else 6)
+    fig, ax = plt.subplots(figsize=(7, 5))
+    for nombre, rotulo, media, sigma, D in filas:
+        ax.errorbar(D, media, yerr=sigma, fmt=MARCADORES[nombre], color=COLORES[nombre],
+                    capsize=3, markersize=11 if nombre == "vacia" else 8, label=rotulo)
     ax.set_xlabel(r"D [m$^2$/s]")
     ax.set_ylabel(r"$\langle t_{90} \rangle$ [s]")
-    ax.set_title(f"t90 vs D (ajuste D en ventana [0,{args.fit_tmax}]s)")
     ax.grid(alpha=0.3)
-    ax.legend()
+    ax.legend(fontsize=8)
     fig.tight_layout()
-    Path(args.out).parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(args.out, dpi=150)
-    print(f"\nGrafico -> {args.out}\nDatos   -> {csv_path}")
+    fig.savefig(outdir / "d_vs_t90.png", dpi=150)
+
+    fig, ax = plt.subplots(figsize=(8, 5))
+    for nombre, rotulo, ts, dcm, c0, c1 in curvas:
+        ax.plot(ts, dcm, color=COLORES[nombre], lw=1, label=rotulo)
+        tt = np.linspace(0, args.t_fit, 20)
+        ax.plot(tt, c0 + c1 * tt, color="black", lw=1.5)
+    ax.axvline(args.t_fit, color="gray", ls=":")
+    ax.set_xlim(0, max(6 * args.t_fit, 12))
+    ax.set_xlabel("t [s]")
+    ax.set_ylabel(r"DCM [m$^2$]")
+    ax.grid(alpha=0.3)
+    ax.legend(fontsize=8)
+    fig.tight_layout()
+    fig.savefig(outdir / "dcm_mejores.png", dpi=150)
+    print(f"\nSalida -> {outdir}/")
 
 
 if __name__ == "__main__":
